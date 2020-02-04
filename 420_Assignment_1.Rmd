@@ -1,0 +1,796 @@
+---
+title: "Daniel Fusca BCB420 Assignment 1"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+# Introduction to dataset
+(Note: answers to questions in the "Interpretation" section of the assignment
+are distributed throughout the notebook and indicated in **bold**)
+
+The dataset that I have selected for this assignment has GEO accession number
+GSE125066 and can be found at [this URL.](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE125066)
+The dataset is named "Effect of *Toxoplasma gondii* efector TgIST on global 
+transcriptome of human foreskin fibroblasts (HFFs) upon type I IFN activation", and
+comes from the 2019 paper "*Toxoplasma gondii* effector TgIST blocks type I
+interferon signaling to promote infection" by Matta et al., which can be found 
+at [this URL.](https://www.pnas.org/content/116/35/17480) This experiment collected
+RNA-seq data from human foreskin fibroblasts (HFFs) in 6 different experimental
+groups. **Cells were either left uninfected, infected with wild-type 
+*Toxoplasma gondii* (an intracellular parasite), or infected with knockout *T. gondii*
+missing a gene encoding a protein (TgIST) secreted during host infection. For each of
+these 3 infection treatments, human cells were either treated with IFN-B (a 
+signalling molecule used to activate host defenses) or left untreated. So, there
+is 1 control condition (uninfected-untreated) and 5 different experimental
+conditions (uninfected & IFNB-treated, wild-type infected & untreated, wild-type
+infected & IFNB-treated, knockout-infected & untreated, and knockout-infected &
+IFNB-treated). Each of these 6 conditions was done in triplicate, for a total of
+18 different replicates.**
+
+**While there are lots of interesting comparisons I can make here, the one I'm 
+most interested in is comparing uninfected human cells (control) to human cells infected
+with wild-type *T. gondii* (test condition), both without any IFN-B treatment. I 
+spent a year doing a bioinformatics research project on *T. gondii*, but the focus 
+of that project was genetic variation between *T. gondii* strains. So, I'm interested
+in *T. gondii*, but I'm not sure what kind of effect it has on humans when it actually
+infects them. *T. gondii* is known to manipulate its host cell to help its own 
+survival, so I was curious to see what kind of gene expression changes might occur in 
+cells infected with the parasite. I found this dataset with gene expression data 
+for healthy human cells and cells infected with *T. gondii*, so I thought it would 
+be interesting to compare these conditions and see what's different.**
+
+
+# Basic setup and data downloading
+My pipeline here requires 5 different R packages: BiocManager, GEOquery, edgeR, 
+biomaRt, and ggplot2. If these packages aren't already installed, the code here
+installs them:
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+if (!requireNamespace("GEOquery", quietly = TRUE))
+    BiocManager::install("GEOquery")
+
+if (!requireNamespace("edgeR", quietly = TRUE))
+    BiocManager::install("edgeR")
+
+if (!requireNamespace("biomaRt", quietly = TRUE))
+    BiocManager::install("biomaRt")
+
+if (!requireNamespace("ggplot2", quietly = TRUE))
+    install.packages("ggplot2")
+```
+
+
+I now need to download the actual GEO dataset. Since downloading this dataset takes
+a bit of time, I don't download the dataset if it's already been downloaded. If the
+data hasn't been downloaded yet, I use GEOquery to put all of the data into a 
+directory called "GSE125066":
+```{r}
+if (!dir.exists("GSE125066")) {
+  queryData <- GEOquery::getGEOSuppFiles("GSE125066")
+}
+```
+
+I then load the downloaded gene expression data into R using read.csv:
+```{r}
+# Reading in the dataset using read.csv is kind of slow, so after reading it the
+# first time, I save the result as an RData object that can be loaded on future
+# runs of this notebook
+if (!file.exists("GSE125066RawData.RData")) {
+  rawData <- read.csv("~/GSE125066/GSE125066_Expression_Values.csv.gz", header = T, 
+                    check.names = F)
+  save(rawData, file = "GSE125066RawData.RData")
+} else {
+  load("GSE125066RawData.RData")
+}
+```
+
+# Initial cleaning of dataset
+This dataset contains a lot of different columns:
+```{r}
+ncol(rawData)
+```
+
+However, I'm only interested in the 18 columns giving raw gene expression counts
+for each gene (1 column for each replicate), along with the columns giving the 
+Ensembl ID and name of each gene. So, I filtered this dataset to remove all of the
+columns I'm not interested in:
+```{r}
+# Column 7 of the dataset contains Ensembl gene IDs, so set these IDs to be 
+# the row names of this dataframe
+rownames(rawData) <- rawData[, 7]
+
+# Get only the columns containing raw gene expression data for each replicate - 
+# these are the columns with names ending in "Total.exon.reads"
+expressionData <- rawData[, grepl("Total exon reads", colnames(rawData))]
+
+# In addition to the row names being Ensembl gene IDs, have a separate column
+# containing the gene names givin in the dataset (for comparison after mapping
+# Ensembl IDs to HUGO symbols)
+expressionData <- cbind(Gene = rawData[, 1], expressionData)
+```
+
+**In addition to the first column giving the name of each gene, this dataframe has 18
+other columns corresponding to the 18 experimental replicates sequenced in this
+study:**
+```{r}
+colnames(expressionData)
+```
+**Here, all of the replicates beginning with "UI" are human foreskin fibroblast 
+cells that are uninfected with *T. gondii*, the replicates beginning with "RH"
+are infected with wild-type *T. gondii*, and the replicates beginning with "KO"
+are infected with mutant *T. gondii* parasites where one of the proteins secreted
+during infection is knocked out. Following these identifiers, the replicates
+named "UT" were not treated with IFN-B, and the replicates named "IFNB" were treated
+with IFN-B. Each of these 6 experimental combinations was done in triplicate, for
+a total of 18 different replicates.**
+
+**For the purposes of my project, I only need to compare healthy control cells with
+a single experimental treatment. I'm interested in seeing which genes are 
+differentially-expressed in human cells that are infected with wild-type *T. gondii*, 
+so I want to compare uninfected, non-IFN-B treated cells ("UI_UT") with wild-type infected,
+non IFN-B treated cells ("RH_UT"). When I'm doing my differential-expression 
+analysis, I only want to look at the 6 replicates within this control and treatment
+group, but for the purposes of cleaning up my dataset, I think it makes sense to
+normalize and filter using all 18 replicates at the same time, since this data was
+collected, sequenced and processed with all replicates together. I can do my cleaning here using 
+all 18 replicates, and then just filter the dataframe later to get the replicates
+that I'm interested in analyzing further.**
+
+To make this processing easier, I should rename the columns that contain data for
+the 18 experimental replicates, so that they're easier to read and identify:
+```{r}
+# Use rep() to define labels for all of the 18 different samples, based on their
+# infection status, IFN-B treatment status, and replicate number
+infections <- rep(c("UI_", "RH_", "KO_"), each = 6)
+treatments <- rep(c("UT_", "IFNB_"), each = 3, length.out = 18)
+replicates <- rep(c("RepA", "RepB", "RepC"), length.out = 18)
+
+
+# Simplify the column names of the 18 different replicates to more easily distinguish
+# different replicates within the same experimental condition
+colnames(expressionData) <- c("Gene", 
+                              paste(infections, treatments, replicates, sep = ""))
+```
+
+The columns in my expression dataframe are now named as follows:
+```{r}
+colnames(expressionData)
+```
+The first column here contains the gene names included with the GEO dataset, and
+each of the 18 following columns gives expression data for one of the 18 experimental
+replicates.
+
+Here's a small subset of my dataset (the last 6 rows) to better show how this dataset
+is structured. All values here are raw gene expression counts (i.e. not normalized
+yet).
+```{r}
+tail(expressionData)
+```
+
+Before I do any filtering or normalization, it would be good to know how many genes
+are in this initial dataset:
+```{r}
+# How many different Ensembl IDs are in the dataset?
+nrow(expressionData)
+
+# How many unique gene names are in the dataset?
+length(unique(expressionData$Gene))
+
+# So, every row in this dataset has a unique name in the "Gene" column:
+nrow(expressionData) == length(unique(expressionData$Gene))
+
+# However, these gene names aren't all entirely unique. For example, the first
+# 7 genes in this dataset are all called "5S_rRNA" but with a different number
+# appended to the end
+head(expressionData$Gene, 7)
+```
+
+Knowing that every row contains a unique Ensembl ID (and so likely a unique gene, although
+I'll have to check HUGO symbols to confirm this), I can next ask: does every gene 
+in my dataset have some sort of expression value for each of the 18 replicates, or 
+are there any missing or invalid values? I'm expecting all of my count data to be
+non-negative integers, so to confirm this I checked for any NA or negative values:
+```{r}
+# Are any values in the expression dataset NA?
+sum(is.na(expressionData[ , 2:19]))
+
+# Are all 18 columns in the expression dataset non-negative integers?
+sum(apply(expressionData[, 2:19], 2, is.integer))
+sum(expressionData[ , 2:19] < 0)
+```
+So, each of the 18 columns of this dataset that contain expression values only
+contain non-negative integer values, and none of them contain missing data in the 
+form of NA values. This means there are no obvious technical errors that would 
+require me to remove any rows from my dataset.
+
+Now that I know there are no major issues with my expression data, I can start looking
+at how these expression values are distributed. For example, how many total counted reads
+are in each of the 18 replicates (i.e. what does each column sum to)?
+```{r}
+colSums(expressionData[ , 2:19])
+```
+So, there's a lot of variation in the sequencing depth for each of these replicates 
+(although these counts don't include sequenced reads that weren't mapped onto genes
+and used for counting). The total RNAs counted in each replicate range from 8,123,030
+to 32,867,480, so it would be a good idea to normalize my counts for sequencing
+depth (e.g. using Counts Per Million).
+
+Next, for each of the 18 replicates, as an overview I got the minimum, first quartile, 
+median, mean, third quartile, and maximum expression values using the summary()
+function:
+```{r}
+summary(expressionData[ , 2:19])
+```
+One conclusion to draw from these statistics is that all of the replicates have
+a median expression value of 0, meaning that at least half of the genes in each
+replicate did not have any detected expression at all. 
+
+
+As part of cleaning up this dataset, I should remove genes that have very low
+expression. As a first pass, I can look at how many genes had no detected expression
+in any of the replicates, as these are obviously genes that I would want to filter
+out.
+```{r}
+sum(rowSums(expressionData[, 2:19]) == 0)
+
+# What percentage of the entire dataset is that?
+100 * (sum(rowSums(expressionData[, 2:19]) == 0) / nrow(expressionData))
+```
+
+
+For my project, I'm only really interested in the "UI_UT" data columns and the
+"RH_UT" data columns. How many genes had 0 detected expression in all 6 of these
+columns?
+```{r}
+sum(rowSums(expressionData[ , c(2, 3, 4, 8, 9, 10)]) == 0)
+
+# What percentage of the entire dataset is this?
+100 * (sum(rowSums(expressionData[ , c(2, 3, 4, 8, 9, 10)]) == 0) / nrow(expressionData))
+
+```
+So, almost half the listed genes in this dataset had 0 detected expression across
+all 18 of the replicates I'm using here. Considering just the 6 replicates corresponding
+to the control and treament conditions I want to actually analyze, this percentage jumps
+to over 54%. Thus, there's definitely a need for me to filter out lowly-expressed genes.
+
+
+Each experimental condition has 3 replicates, so edgeR recommends
+only keeping genes expressed to at least 1 read per million in at least 3 of the
+replicates. The following code filters out all of the genes that do not meet this
+criteria:
+```{r}
+# Create a dataframe where the raw counts from expressionData are converted to
+# counts per million, using edgeR's cpm function. These lines are based off of
+# code shown in Lecture 4 of BCB420
+countsPerMillion <- edgeR::cpm(expressionData[ , 2:19])
+expressionData_filtered <- expressionData[rowSums(countsPerMillion >= 1) >= 3, ]
+```
+
+
+How many genes are we left with after filtering out lowly-expressed genes?
+```{r}
+nrow(expressionData_filtered)
+
+# How many genes were filtered out due to being too lowly-expressed?
+nrow(expressionData) - nrow(expressionData_filtered)
+
+# What percentage of the initial dataset is left after filtering out low counts?
+100 * (nrow(expressionData_filtered) / nrow(expressionData))
+```
+
+**So, after filtering out 42,951 lowly-expressed genes, I'm left with 14,822 genes, 
+which is around a quarter of the 57,773 genes that were present in the initial GEO dataset.
+Aside from these 42,951 "outliers" that I removed, I'm not going to exclude any other
+genes on the basis of their gene expression data. I don't have any reason to
+suspect that any of these observations were the result of measurement error - all
+of the data here are non-negative integers, as expected of counts, and the distribution
+of expression values looked pretty normal to me.**
+
+
+For each of the 18 replicates, get the minimum, first quartile, median, mean, 
+third quartile, and maximum values of the remaining genes:
+```{r}
+summary(expressionData_filtered[ , 2:19])
+```
+The medians and first quartiles of all 18 replicates are now well above 0, so it
+seems that the filtering here was able to successfully remove genes that were expressed
+at very low levels. However, the distribution of expression data appears to differ
+pretty substantially between the 18 replicates - the median values range from 
+148 to 477. Ideally, I want the distributions of expression values to be pretty
+similar to each other, so this is a sign that I should normalize my data. Before
+I do any normalization though, I should assign all of these genes HUGO symbols.
+
+
+# Identifier mapping
+For my final dataset, I want all of the rows of my dataframe (i.e. every different
+gene) to be named after the HUGO symbol for that gene, rather than its Ensembl ID
+as they are currently. Since I have a unique Ensembl ID for all of these genes, 
+I can perform some identifier mapping to map these Ensembl IDs onto HUGO symbols, 
+and then assign HUGO symbols to genes. To do this identifier mapping, I can use
+the biomaRt package to query Ensembl for the HUGO symbols corresponding to my 
+Ensembl IDs.
+
+This code is based off of the code presented in Lecture 4 of BCB420 for querying 
+Biomart using the biomaRt package. Since retrieving this data from Ensembl can be 
+slow, we only actually retrieve it the first time this code is run, after which we 
+save it as an RData file. If we've run this code once already, we can just load 
+the identifier mapping we saved previously:
+```{r}
+# Code to query Biomart and obtain HUGO symbols based off of code presented in 
+# lecture. When I initially tried setting up my mart object, I kept getting errors
+# because the Ensembl web server was experiencing some server issues, so here I
+# specified a different host (http://useast.ensembl.org) without server issues.
+# This is based on code from the Bioconductor support forum found here: 
+# https://support.bioconductor.org/p/122843/#122887
+if (!file.exists("GSE125066HUGONames.RData")) {
+  humanEnsembl <- biomaRt::useEnsembl("ensembl", "hsapiens_gene_ensembl", 
+                                      host = 'http://useast.ensembl.org')
+  HUGONameConversions <- biomaRt::getBM(attributes = c("ensembl_gene_id","hgnc_symbol"), 
+                                      filters = c("ensembl_gene_id"), 
+                                      values = rownames(expressionData_filtered), 
+                                      mart = humanEnsembl)
+  save(HUGONameConversions, file = "GSE125066HUGONames.RData")
+} else {
+  load("GSE125066HUGONames.RData")
+}
+
+```
+
+
+I now have a dataframe with 2 columns: the first contains Ensembl IDs, and the second
+contains the HUGO symbol corresponding to that ID. First, I asked: how many rows 
+are in the resulting Ensembl-HUGO identifier mapping?
+```{r}
+nrow(HUGONameConversions)
+```
+
+Did any Ensembl IDs map onto more than 1 HUGO ID?
+```{r}
+length(unique(HUGONameConversions$ensembl_gene_id))
+length(unique(HUGONameConversions$ensembl_gene_id)) == nrow(HUGONameConversions)
+```
+
+The Ensembl-HUGO mapping dataframe contains 14,472 Ensembl IDs in total, but only
+14,471 unique Ensembl IDs. It looks like a single Ensembl ID mapped onto two different 
+HUGO IDs (all other Ensembl IDs mapped to at most 1 HUGO symbol). To find which ID this 
+is, I used the following command to count how many times each Ensembl ID appears 
+in the Ensembl-HUGO mapping, and return the Ensembl IDs that appear more than once.
+```{r}
+table(HUGONameConversions$ensembl_gene_id)[table(HUGONameConversions$ensembl_gene_id) != 1]
+```
+So, ENSG00000230417 mapped onto 2 different HUGO symbols:
+```{r}
+HUGONameConversions[HUGONameConversions$ensembl_gene_id == "ENSG00000230417", ]
+```
+
+Since my dataset of expression values from GEO has a column giving the name of 
+each gene (in addition to its Ensembl ID), I can look up this Ensembl ID in my 
+expression dataset to see what name was given to it:
+```{r}
+expressionData_filtered["ENSG00000230417", "Gene"]
+```
+So, the Ensembl ID "ENSG00000230417" mapped onto both "LINC00595" and "LINC00856", 
+but in the expression dataset it is only named as "LINC00856". Also, none of the
+genes in the expression dataset were given the name "LINC00595":
+
+```{r}
+"LINC00595" %in% expressionData_filtered$Gene
+```
+Since I can only assign 1 name to the row containing ENSG00000230417, I'm going to
+break the tie between its 2 mapped HUGO symbols by naming it LINC00856, as this is
+what it was already called in the GEO dataset. This is so that I'm consistent 
+with my approach for giving names to Ensembl IDs that didn't map to HUGO symbols, 
+since in that case my only option is going to be to use the gene names already 
+present in the GEO dataset.
+
+Since I'm not using the mapping between ENSG00000230417 and LINC00595, I removed it
+from the Ensembl-HUGO mapping dataframe:
+```{r}
+HUGONameConversions <- HUGONameConversions[HUGONameConversions$hgnc_symbol != "LINC00595", ]
+
+# How many rows are left in the resulting Ensembl-HUGO dataframe?
+nrow(HUGONameConversions)
+```
+
+Next, I looked at how many rows in this dataframe did NOT map onto an empty HUGO symbol. This number
+gives the total number of unique Ensembl IDs in our filtered expression dataset that were able
+to map to a HUGO symbol (since after the above removal of LINC00595, no Ensembl ID maps to more
+than 1 HUGO ID)
+```{r}
+# How many Ensembl IDs in our filtered dataset were mapped onto a HUGO symbol?
+sum(HUGONameConversions$hgnc_symbol != "")
+
+# How many Ensembl IDs in our filtered dataset WEREN'T mapped onto a HUGO symbol?
+# (This includes those not present in the mapping dataframe, plus those in the 
+# mapping dataframe that mapped onto "")
+nrow(expressionData_filtered) - sum(HUGONameConversions$hgnc_symbol != "")
+
+# What percentage of the Ensembl IDs in our filtered dataset were able to map 
+# onto a HUGO symbol?
+100 * (sum(HUGONameConversions$hgnc_symbol != "") / nrow(expressionData_filtered))
+```
+Over 90% of the genes in my filtered dataset (13,815) were able to map onto a HUGO ID, which
+is pretty good. **However, there were 1007 Ensembl IDs (and therefore rows of
+expression values) that did NOT map onto any HUGO symbols (note that this mapping
+only used the 14,822 genes that passed my filter for lowly-expressed genes - when
+considering the full set of 57,773 genes initially in this dataset, it is likely
+that more than 1007 Ensembl IDs would have failed to map). For these 1007 genes, 
+I'm going to have to set their HUGO symbol as the name that was given to them in 
+the original GEO dataset.**
+
+I then looked at another issue that could have arisen during mapping: did multiple
+different Ensembl IDs map to the same HUGO symbol? The code here gets all of the
+HUGO symbols that mapped with more than 1 Ensembl ID:
+```{r}
+table(HUGONameConversions$hgnc_symbol)[table(HUGONameConversions$hgnc_symbol) != 1]
+```
+There appears to be 2 different values that appear more than one time in the 
+"HUGO Symbol" column of the mapping. There's an empty string that appears 656 
+times - these are Ensembl IDs that were unable to map onto any HUGO
+ID. The only actual HUGO ID that appears in this mapping more than 1 time is
+TUBB7P, which 2 different Ensembl IDs mapped onto:
+```{r}
+HUGONameConversions[HUGONameConversions$hgnc_symbol == "TUBB7P", ]
+```
+It looks like both ENSG00000173876 and ENSG00000251297 mapped onto the same 
+HUGO symbol, although these are the only genes to do so. I'm going to deal with
+this issue after I give HUGO symbols to the Ensembl IDs that didn't map onto 
+anything, since this process might create additional duplications.
+
+
+I then added all of my HUGO symbols to my dataframe of gene expression values, 
+based on the Ensembl ID that they mapped to:
+```{r}
+# Merge the expression dataframe and the HUGO symbol mapping, using Ensembl IDs
+# to match between dataframes. These IDs are the row names of the expression dataset
+# and the first column of the HUGO symbol mapping
+HUGO_expressionData_filtered <- merge(expressionData_filtered, HUGONameConversions, 
+                                      by.x = "row.names", by.y = "ensembl_gene_id", 
+                                      all.x = T)
+
+# Ensembl IDs not included in the Ensembl-HUGO mapping will have their HUGO symbol
+# set to NA - set all of these to "" to match the other 656 Ensembl IDs that 
+# didn't map properly
+HUGO_expressionData_filtered$hgnc_symbol[is.na(HUGO_expressionData_filtered$hgnc_symbol)] <- ""
+
+# How many genes have a HUGO symbol that matches the gene name that was initially
+# given to it in the GEO dataset?
+sum(HUGO_expressionData_filtered$hgnc_symbol == HUGO_expressionData_filtered$Gene)
+
+# What percentage of the entire dataset is this?
+100 * sum(HUGO_expressionData_filtered$hgnc_symbol == 
+            HUGO_expressionData_filtered$Gene) / nrow(HUGO_expressionData_filtered)
+
+```
+Almost all (around 86%) of the genes in the filtered expression dataset had names
+that already matched the HUGO symbols I just assigned them. Out of the remaining 14% of 
+genes, some genes will have different names because they didn't map onto any HUGO
+symbol at all - as previously shown, there are 1007 of these genes. For these 1007
+genes, I think it makes the most sense to give them the name that was already
+present in the GEO dataset. As shown above, the names in the dataset almost all
+matched the HUGO symbols I just assigned, so I'm reasonably confident that the 
+names in the expression dataset right now are pretty accurate HUGO symbols. If I want to give
+names to the genes that didn't map onto HUGO symbols, my best course of action is
+probably to fill in these missing values using the names already present in the
+dataset. I don't really have an easy way of getting other names for these genes, so
+this seems like the best course of action. 
+
+The code below gets all of the genes that didn't map to HUGO symbols, and assigns 
+their HUGO symbol as the name already given in the GEO dataset:
+```{r}
+# Convert HUGO symbols to character to avoid issues with using factors
+HUGO_expressionData_filtered$hgnc_symbol <- as.character(HUGO_expressionData_filtered$hgnc_symbol)
+
+HUGO_expressionData_filtered$hgnc_symbol[HUGO_expressionData_filtered$hgnc_symbol == ""] <- 
+  as.character(HUGO_expressionData_filtered$Gene[HUGO_expressionData_filtered$hgnc_symbol == ""])
+
+```
+
+The code above got rid of all of the genes with a HUGO symbol of "":
+```{r}
+sum(HUGO_expressionData_filtered$hgnc_symbol == "")
+```
+
+After filling in that missing information, how many genes still have HUGO symbols
+that don't match the name given in the initial GEO dataset?
+```{r}
+sum(HUGO_expressionData_filtered$hgnc_symbol != HUGO_expressionData_filtered$Gene)
+
+# What percentage of the entire dataset is this?
+100 * sum(HUGO_expressionData_filtered$hgnc_symbol != 
+            HUGO_expressionData_filtered$Gene) / nrow(HUGO_expressionData_filtered)
+```
+
+These 1053 genes are likely those that have outdated annotations compared to what's 
+currently on Ensembl, so in these cases I think it makes the most sense to ignore
+the names that were initially in the GEO dataset and use the HUGO symbols I just
+mapped for them.
+
+Before I finish with my identifier mapping and move on to normalization, I still
+need to address the genes where 2 different Ensembl IDs mapped onto the same HUGO
+symbol. I previously identified the TUBB7P gene as being problematic in this regard, 
+but filling in missing HUGO IDs using the names in the GEO dataset created an 
+additional 8 cases of this issue:
+```{r}
+table(HUGO_expressionData_filtered$hgnc_symbol)[table(HUGO_expressionData_filtered$hgnc_symbol) != 1]
+```
+**There are now 9 HUGO symbols (ACBD6, AGAP9, C17orf100, CBWD6, MEG8, NBPF20, RPS17, TUBB7P, 
+and ZCCHC3) that each map onto 2 different Ensembl IDs:**
+```{r}
+duplicates <- c("ACBD6", "AGAP9", "C17orf100", "CBWD6", "MEG8", "NBPF20", "RPS17", 
+                "TUBB7P", "ZCCHC3")
+
+HUGO_expressionData_filtered[HUGO_expressionData_filtered$hgnc_symbol %in% duplicates, 
+                             c("Row.names", "Gene", "hgnc_symbol")]
+```
+**Thus, right now in my dataset there are 18 rows of expression values that belong 
+to only 9 different genes, based on HUGO symbols. I think the fairest way to resolve 
+these conflicts is, for each replicate, to add together the counts for each pair 
+of identical HUGO symbols. The only other option would be to completely ignore one of the 
+"duplicate" genes in each pair, but the issue with that is I don't really have a 
+good way of deciding which gene within each pair to ignore, and which to keep. 
+So, in order to not ignore any reads that appear to map onto genes, I'm going 
+to combine the counts within each pair by adding them up, for each of the 18 replicates.**
+```{r}
+# Define a function to take in 2 Ensembl IDs and a gene expression dataset, add
+# together the 2 rows corresponding to these IDs, and then remove 1 of the rows
+addAndRemoveDuplicates <- function(ID1, ID2, expressionData) {
+  expressionData[expressionData$Row.names == ID1, 3:20] <- 
+  expressionData[expressionData$Row.names == ID1, 3:20] + 
+  expressionData[expressionData$Row.names == ID2, 3:20]
+  
+  expressionData <- expressionData[expressionData$Row.names != ID2, ]
+  
+  return(expressionData)
+}
+
+
+# Call this function on the 9 pairs of Ensembl IDs that map to duplicate HUGO symbols
+HUGO_expressionData_filtered <- addAndRemoveDuplicates("ENSG00000135847", 
+                                                       "ENSG00000230124", 
+                                                       HUGO_expressionData_filtered)
+HUGO_expressionData_filtered <- addAndRemoveDuplicates("ENSG00000198035", 
+                                                       "ENSG00000204172", 
+                                                       HUGO_expressionData_filtered)
+HUGO_expressionData_filtered <- addAndRemoveDuplicates("ENSG00000212734", 
+                                                       "ENSG00000256806", 
+                                                       HUGO_expressionData_filtered)
+HUGO_expressionData_filtered <- addAndRemoveDuplicates("ENSG00000204790", 
+                                                       "ENSG00000215126", 
+                                                       HUGO_expressionData_filtered)
+HUGO_expressionData_filtered <- addAndRemoveDuplicates("ENSG00000225746", 
+                                                       "ENSG00000258399", 
+                                                       HUGO_expressionData_filtered)
+HUGO_expressionData_filtered <- addAndRemoveDuplicates("ENSG00000162825", 
+                                                       "ENSG00000203832", 
+                                                       HUGO_expressionData_filtered)
+HUGO_expressionData_filtered <- addAndRemoveDuplicates("ENSG00000182774", 
+                                                       "ENSG00000184779", 
+                                                       HUGO_expressionData_filtered)
+HUGO_expressionData_filtered <- addAndRemoveDuplicates("ENSG00000173876", 
+                                                       "ENSG00000251297", 
+                                                       HUGO_expressionData_filtered)
+HUGO_expressionData_filtered <- addAndRemoveDuplicates("ENSG00000177764", 
+                                                       "ENSG00000247315", 
+                                                       HUGO_expressionData_filtered)
+```
+
+How many genes are we now left with in our expression dataset after merging these
+9 pairs of rows?
+```{r}
+nrow(HUGO_expressionData_filtered)
+```
+This is 9 fewer genes than I had before (14,822), which is as expected since I
+should have only removed 9 rows from my dataframe.
+
+After merging those 9 pairs of rows, every gene in this dataset now has a 
+unique HUGO symbol:
+```{r}
+length(unique(HUGO_expressionData_filtered$hgnc_symbol))
+length(unique(HUGO_expressionData_filtered$hgnc_symbol)) == nrow(HUGO_expressionData_filtered)
+```
+
+Now, I can set the row names of my expression dataframe to be HUGO symbols instead
+of Ensembl IDs, and then remove all of the columns from my dataframe that aren't
+the 18 columns of expression values:
+```{r}
+# Set the row names to be HUGO symbols
+rownames(HUGO_expressionData_filtered) <- HUGO_expressionData_filtered$hgnc_symbol
+
+# Remove all of the columns except those containing gene expression information
+HUGO_expressionData_filtered <- HUGO_expressionData_filtered[ , 3:20]
+```
+
+If I did everything correctly, I should now have a dataframe with 14,813 rows 
+(one for each gene) and 18 columns (1 for each replicate):
+```{r}
+dim(HUGO_expressionData_filtered)
+```
+
+
+
+# Normalization
+My final major step here is to normalize my expression dataset. As I found previously, 
+the replicates here vary quite a bit in the depth they were sequenced to. To account
+for this, I can normalize my data by taking the log2 of the Count Per Million (CPM) 
+for each expression value, using Trimmed Mean of M-values (TMM) normalization. This
+should correct for the technical variation present in this data.
+
+The code here performs the log-CPM and TMM normalization on my data. For comparison
+purposes, I calculated log-CPM values both with and without TMM normalization. This code
+is based off of the normalization code presented in Lecture 4 of BCB420.
+```{r}
+# Save the dataframe of non-normalized expression data as an edgeR object, assigning
+# each of the replicates to 1 of 6 experimental groups
+edgeRExpressionData <- edgeR::DGEList(HUGO_expressionData_filtered, 
+            group = rep(c("UI_UT", "UI_IFNB", "RH_UT", "RH_IFNB", "KO_UT", "KO_IFNB"), each = 3))
+
+# Calculate normalization factors for TMM
+normalizedExpressionData <- edgeR::calcNormFactors(edgeRExpressionData)
+
+# Estimate dispersion values for the normalized count data. To make comparisons
+# later, also estimate dispersion values for the non-normalized data, to compare
+# the effects of normalization
+normalizedExpressionData <- edgeR::estimateDisp(normalizedExpressionData)
+edgeRExpressionData <- edgeR::estimateDisp(edgeRExpressionData)
+
+
+# Take the log2 of the CPM for both the TMM-normalized and non-normalized count
+# data
+logCPMExpressionData <- edgeR::cpm(edgeRExpressionData, log = T)
+logCPMNormalizedExpressionData <- edgeR::cpm(normalizedExpressionData, log = T)
+```
+
+I now have an expression dataset that's been normalized to log-CPM units with a 
+TMM normalization. Here are some summary statistics for the distribution of expression
+values within each replicate:
+```{r}
+summary(logCPMNormalizedExpressionData)
+```
+From these statistics, I can conclude that after log-CPM and TMM normalization, 
+the distributions of expression values are pretty similar between all 18 replicates.
+
+To get a better view of how expression values are distributed within my 18 replicates
+after normalization, I can make boxplots. Here, I plot my expression data both 
+with and without TMM normalization, to see the effect of TMM normalization. 
+Labels for replicates are colored based on their 
+combination of infection status (either uninfected, wild-type infected, or knockout
+infected) and IFN-B treatment (either untreated or treated). 
+```{r}
+# Adjust the margins so that the x-axis labels don't get cut off
+par(mar=c(8,4,4,2))
+
+# Draw the plots
+colorsForPlotting <- rep(c("lightcoral", 
+    "darkred", "lightblue", "blue", "lightgreen", "darkgreen"), each = 3)
+boxplot(logCPMExpressionData, las = 2, ylab = "log2 CPM", 
+        main = "After log-CPM normalization but without TMM normalization", 
+        col = colorsForPlotting)
+boxplot(logCPMNormalizedExpressionData, las = 2, ylab = "log2 CPM", 
+        main = "After log-CPM and TMM normalization", 
+        col = colorsForPlotting)
+# Reset the margins back to their default values
+par(mar=c(5,4,4,2))
+```
+
+TMM normalization appears to have made the distributions of all 18 replicates 
+slightly more similar to each other, although the effect isn't that large. 
+
+As another view of this data, I can make density plots of my expression data, 
+again both with and without TMM normalization:
+```{r}
+# Define a function to take in a dataset of log-CPM expression values, and plot
+# the density of expression values
+makeDensityPlot <- function(expressionData, plotTitle) {
+
+  dataToPlot <- data.frame(Sample = colnames(expressionData)[1], Expression = 
+                             expressionData[ , 1])
+  
+  for (i in 2:18) {
+    dataToPlot <- rbind(dataToPlot, data.frame(Sample = colnames(expressionData)[i], Expression = 
+                             expressionData[ , i]))
+  }
+  
+  ggplot2::ggplot(dataToPlot, ggplot2::aes(x = Expression, color = Sample)) + 
+    ggplot2::geom_density() + ggplot2::labs(title = plotTitle, x = "log2 CPM", 
+                                            y = "Density")
+  
+}
+
+# Draw density plots for the non-TMM normalized and TMM normalized data, using
+# the above function
+makeDensityPlot(logCPMExpressionData, 
+                plotTitle = "After log-CPM normalization but without TMM normalization")
+makeDensityPlot(logCPMNormalizedExpressionData, 
+                plotTitle = "After log-CPM and TMM normalization")
+```
+
+Again, it looks like TMM normalization made all of the distributions slightly
+more similar to each other, but not by much.
+
+
+To see how similar the expression profiles of my replicates are to each other, 
+I can make MDS plots using their expression data. Ideally, all 3 replicates within
+an experimental treatment should cluster together, and the 6 groups of experimental
+treatments should be fairly separated from each other. To look at this while also
+examining the effects of normalization, I made MDS plots for the raw count data, 
+the count data normalized by log-CPM but not TMM, and the count data normalized
+by both log-CPM and TMM. 
+```{r}
+limma::plotMDS(HUGO_expressionData_filtered, col = colorsForPlotting, main = 
+                 "Before log-CPM and TMM normalization")
+limma::plotMDS(logCPMExpressionData, col = colorsForPlotting, 
+               main = "After log-CPM normalization but without TMM normalization")
+limma::plotMDS(logCPMNormalizedExpressionData, col = colorsForPlotting, main = 
+                 "After log-CPM and TMM normalization")
+```
+
+After performing all of my normalization, the 18 replicates cluster pretty nicely
+into 6 different groups, indicating that expression profiles are more similar between
+replicates in the same experimental treatment than in different experimental treatments, 
+as expected. While TMM normalization doesn't have much of an effect on the clustering, 
+the log-CPM normalization seems to have a substantial effect - without any log-CPM 
+normalization, replicates are a lot more spread out instead of clustering together, 
+likely due to the effect of differing sequencing depths. 
+
+
+To better understand the variation present within my expression dataset, I can 
+make dispersion plots to see how much expression varies between different genes. 
+I made these plots using my data from before and after TMM normalization, to see
+if this normalization has any effect.
+```{r}
+# Plot tagwise dispersions with and without TMM normalization
+edgeR::plotBCV(edgeRExpressionData, main = "Before TMM normalization")
+edgeR::plotBCV(normalizedExpressionData, main = "After TMM normalization")
+```
+
+These plots look pretty normal - as expected, dispersion tends to decrease as 
+average expression increases. Based on these plots, it doesn't look like TMM normalization has much of an effect
+on the distribution of tagwise dispersions.
+
+
+# Output final dataset
+Now that all of my cleaning and normalization are done, I can export my finalized
+dataframe. Again, here are the dimensions of this dataframe:
+```{r}
+dim(logCPMNormalizedExpressionData)
+```
+**My final dateset of gene expression values contains 14,813 different genes with 
+expression data for 18 different replicates (although my differential-expression 
+analyses will only look at 6 of these replicates). To recap, my initial GEO 
+dataset contained 57,773 different genes, and after filtering out lowly-expressed
+genes (those without at least 1 CPM in at least 3 different replicates) I was left
+with 14,822 genes. After performing identifier mapping and collapsing together 18
+pairs of genes that had identical HUGO symbols, I was left with my final total 
+of 14,813 genes.** The values in this dataframe (logCPMNormalizedExpressionData) 
+are normalized to units of log2 Counts Per Million, using the TMM method of normalization.
+The name of every row is a different HUGO symbol.
+
+Here's what the first 6 rows of this dataset look like, to give a representation
+of how it's structured:
+```{r}
+head(logCPMNormalizedExpressionData)
+```
+
+For future use with the rest of my project, I should export this expression dataframe
+onto my computer. First, I saved this dataset as an RData object named "logCPMNormalizedExpressionData.RData"
+```{r}
+save(logCPMNormalizedExpressionData, file = "logCPMNormalizedExpressionData.RData")
+```
+
+Whenever I need this dataframe, I can just load it into R using the load() function. 
+
+Additionally, I also saved this same dataset as a CSV file, in case I want it in a
+format that I can actually read or use outside of R:
+```{r}
+write.csv(logCPMNormalizedExpressionData, file = "logCPMNormalizedExpressionData.csv", 
+          row.names = T, quote = F)
+```
+
+To summarize, this notebook outputs 2 different objects for future use: a dataframe
+of cleaned and normalized gene counts as an RData file (logCPMNormalizedExpressionData.RData), 
+and the exact same dataframe as a CSV file (logCPMNormalizedExpressionData.csv).
