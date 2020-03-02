@@ -6,7 +6,7 @@ output:
   pdf_document: default
 ---
 
-# Introduction to dataset
+## Introduction to dataset
 (Note: answers to questions in the "Interpretation" section of the assignment
 are distributed throughout the notebook and indicated in **bold**)
 
@@ -42,7 +42,7 @@ for healthy human cells and cells infected with *T. gondii*, so I thought it wou
 be interesting to compare these conditions and see what's different.**
 
 
-# Basic setup and data downloading
+## Basic setup and data downloading
 My pipeline here requires 5 different R packages: BiocManager, GEOquery, edgeR, 
 biomaRt, and ggplot2. If these packages aren't already installed, the code here
 installs them:
@@ -80,7 +80,7 @@ I then load the downloaded gene expression data into R using read.csv:
 # first time, I save the result as an RData object that can be loaded on future
 # runs of this notebook
 if (!file.exists("GSE125066RawData.RData")) {
-  rawData <- read.csv("~/GSE125066/GSE125066_Expression_Values.csv.gz", header = T, 
+  rawData <- read.csv("GSE125066/GSE125066_Expression_Values.csv.gz", header = T, 
                     check.names = F)
   save(rawData, file = "GSE125066RawData.RData")
 } else {
@@ -88,7 +88,7 @@ if (!file.exists("GSE125066RawData.RData")) {
 }
 ```
 
-# Initial cleaning of dataset
+## Initial cleaning of dataset
 This dataset contains a lot of different columns:
 ```{r}
 ncol(rawData)
@@ -305,7 +305,7 @@ similar to each other, so this is a sign that I should normalize my data. Before
 I do any normalization though, I should assign all of these genes HUGO symbols.
 
 
-# Identifier mapping
+## Identifier mapping
 For my final dataset, I want all of the rows of my dataframe (i.e. every different
 gene) to be named after the HUGO symbol for that gene, rather than its Ensembl ID
 as they are currently. Since I have a unique Ensembl ID for all of these genes, 
@@ -601,6 +601,10 @@ the 18 columns of expression values:
 # Set the row names to be HUGO symbols
 rownames(HUGO_expressionData_filtered) <- HUGO_expressionData_filtered$hgnc_symbol
 
+# For future use, also save the final mapping between HUGO symbols and Ensembl IDs
+final_HUGO_Ensembl_mapping <- data.frame(Symbol = rownames(
+  HUGO_expressionData_filtered), Ensembl = HUGO_expressionData_filtered$Row.names)
+
 # Remove all of the columns except those containing gene expression information
 HUGO_expressionData_filtered <- HUGO_expressionData_filtered[ , 3:20]
 ```
@@ -612,8 +616,7 @@ dim(HUGO_expressionData_filtered)
 ```
 
 
-
-# Normalization
+## Normalization
 My final major step here is to normalize my expression dataset. As I found previously, 
 the replicates here vary quite a bit in the depth they were sequenced to. To account
 for this, I can normalize my data by taking the log2 of the Count Per Million (CPM) 
@@ -753,7 +756,7 @@ average expression increases. Based on these plots, it doesn't look like TMM nor
 on the distribution of tagwise dispersions.
 
 
-# Output final dataset
+## Output final dataset
 Now that all of my cleaning and normalization are done, I can export my finalized
 dataframe. Again, here are the dimensions of this dataframe:
 ```{r}
