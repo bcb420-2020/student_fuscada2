@@ -6,7 +6,7 @@ output:
   pdf_document: default
 ---
 
-## Introduction to dataset
+## Introduction to dataset (Assignment 1)
 (Note: answers to questions in the "Interpretation" section of the assignment
 are distributed throughout the notebook and indicated in **bold**)
 
@@ -42,7 +42,7 @@ for healthy human cells and cells infected with *T. gondii*, so I thought it wou
 be interesting to compare these conditions and see what's different.**
 
 
-## Basic setup and data downloading
+## Basic setup and data downloading (Assignment 1)
 My pipeline here requires 5 different R packages: BiocManager, GEOquery, edgeR, 
 biomaRt, and ggplot2. If these packages aren't already installed, the code here
 installs them:
@@ -55,6 +55,9 @@ if (!requireNamespace("GEOquery", quietly = TRUE))
 
 if (!requireNamespace("edgeR", quietly = TRUE))
     BiocManager::install("edgeR")
+
+if (!requireNamespace("limma", quietly = TRUE))
+    BiocManager::install("limma")
 
 if (!requireNamespace("biomaRt", quietly = TRUE))
     BiocManager::install("biomaRt")
@@ -88,7 +91,7 @@ if (!file.exists("GSE125066RawData.RData")) {
 }
 ```
 
-## Initial cleaning of dataset
+## Initial cleaning of dataset (Assignment 1)
 This dataset contains a lot of different columns:
 ```{r}
 ncol(rawData)
@@ -305,7 +308,7 @@ similar to each other, so this is a sign that I should normalize my data. Before
 I do any normalization though, I should assign all of these genes HUGO symbols.
 
 
-## Identifier mapping
+## Identifier mapping (Assignment 1)
 For my final dataset, I want all of the rows of my dataframe (i.e. every different
 gene) to be named after the HUGO symbol for that gene, rather than its Ensembl ID
 as they are currently. Since I have a unique Ensembl ID for all of these genes, 
@@ -616,7 +619,7 @@ dim(HUGO_expressionData_filtered)
 ```
 
 
-## Normalization
+## Normalization (Assignment 1)
 My final major step here is to normalize my expression dataset. As I found previously, 
 the replicates here vary quite a bit in the depth they were sequenced to. To account
 for this, I can normalize my data by taking the log2 of the Count Per Million (CPM) 
@@ -756,7 +759,7 @@ average expression increases. Based on these plots, it doesn't look like TMM nor
 on the distribution of tagwise dispersions.
 
 
-## Output final dataset
+## Output final dataset (Assignment 1)
 Now that all of my cleaning and normalization are done, I can export my finalized
 dataframe. Again, here are the dimensions of this dataframe:
 ```{r}
